@@ -1,0 +1,1642 @@
+#!/usr/bin/perl
+# g0, 2018
+# License: GPLx and Artistic
+# Lots of negative logic, Ron, my late CS teacher, would be pissed at me.
+# Light a cigar and relax Ron, it's just a silly Perl script.
+
+use strict;
+my $epoch =  time();
+use Time::HiRes qw(usleep nanosleep time gettimeofday tv_interval);
+my $t0 = [gettimeofday];
+my ($sec0, $micro_sec0) = gettimeofday;
+use File::Basename;
+use Term::ANSIColor;
+use Getopt::Long;
+use Pod::Usage;
+use File::Basename;
+use File::Glob ':globally';
+use v5.10;
+require 'aterlib.pl';
+
+=head1 Description
+
+    Ater, explore baseband AT command interfaces
+
+=cut
+
+=head1 Requirements
+
+    adb
+    an android system that exposes an AT command interface at some serial device
+    AT_serial set in your configuration file, ater.conf
+
+=cut
+
+=head1 Synopsis
+
+    that is; ater -h
+
+=cut
+
+=head1 Options, Examples
+
+
+  --help|h|?
+    list implemented options
+    list configuration files
+
+  --at=s
+    send an AT+COM command
+    s:<+COM>
+    e.g. ater -at +CGMI
+    special characters in commands should be escaped
+    e.g. for AT$QCPWRDN       ater -at \$QCPWRDN
+    e.g. for AT+CLCK="SC",2   ater -at +CLCK=\"SC\",2
+
+  --serial=s
+    select Android device
+    s:adb_android_device_serial_number
+
+  --at-serial|as=s
+    select AT char device
+    s:<AT CLI serial device>
+    not implemented, change it in config
+
+  --stat|statistics
+    print per run statistics for
+      executed AT commands
+      received OKs,
+      errors, trap_triggers, ...
+
+  --learn-verbs|lv
+    try to learn CLI verbs
+    log effort to files
+    it learns through AT commands used to list AT commands
+    the list of commands that list commands could be set at LEARN_VERBS_SEED in the configuration file
+
+  --learn-set-objects|lso
+    implies, input from learn-verbs|lv
+    try to learn AT CLI set objects
+    log effort to files
+
+  --learn-all-objects|lao
+    implies, input from learn-verbs|lv
+    try to learn all listed AT CLI objects
+    log effort to files
+
+  --laocff|learn-all-objects-commands-from-file=s
+    try to learn all listed AT CLI objects
+    log effort to files
+
+  --verbose
+
+  --rate|throttle-factor=i
+    set in milliseconds the wait time in between AT commands,
+    and set in milliseconds the wait time in between an AT command and an AT response read.
+    The default wait time in between commands is 25 milliseconds,
+    the default wait time in between commands and responses is 25 milliseconds,
+    therefore, the default throttle-factor is 50 milliseconds.
+    Throttle factor less than 1ms will be set 1ms..
+
+  --documentation
+    print Ater POD
+
+  --printMD
+    print Ater Readme.MD
+
+  --wait-for-device|w=s
+    wait for android device, s:android_device_serial_number
+    not implemented, for now you can wait using the wait-for-device.sh wrapper
+
+  --grol|get-rid-of-lock
+    remove soft lock and kill adb fetcher
+    that or ah_get_rid_of_lock
+
+  --who
+    who android_device,
+    who baseband_processor
+    who rild
+
+  --debug
+    print Ater debug information
+
+  --time
+    time Ater run
+
+  --chk|check-trap
+    exits with 0 if the trap value is not changed
+    configure TRAP_SET_COMMAND, TRAP_QUERY_COMMAND, TRAP_VALUE in the config file
+
+  --ping
+    exits with 0 if PONG_RESPONSE is seen after a PING_COMMAND command
+    configure PONG_RESPONSE, PING_COMMAND in the config file
+
+  --tc|test-commands-from-file-or-pipe=s
+    test (ATCOM, ATCOM?, ATCOM=?) a list of commands
+    e.g. ater -tc=./at-commands/totry --throttle-factor 300
+    blacklisted commands set in the configuration file are excluded
+
+  --rc|run-commands-from-file-or-pipe=s
+    run a list of commands
+    or drive fuzzing campaigns from files against the AT CLI itself
+    e.g. ater -rc=./at-commands/torun
+    blacklisted commands set in the configuration file are not excluded,
+    just comment out with '#' the commands you don't want to run
+
+    --rwp|run-rc-with-ping
+        send the ping command set at your config
+        in between commands
+
+    --rwt|run-rc-with-chk-trap
+        check the trap set at your config
+        in between commands
+        exit on trigger unless --findresets
+
+    --findresets|rc-find-commands-that-reset-trap
+        find at commands that reset the trap
+        it does not exit on trap trigger
+
+    Examples
+
+    run an AT command
+    ./ater -at \$CCLK?
+
+    scan for cellular networks
+    ./ater -at +COPS=? --throttle-factor=20000
+
+    run a list of commands
+    ./ater -rc=./at-commands/read-messages
+
+    run the same command and print AT command statistics
+    ./ater -rc=./at-commands/read-messages -stats
+
+    run a list of AT commands  with a ping in between commands, exit badly, 3, if the AT device does not pong
+    ./ater -rc=./at-commands/test -rwp  -stats
+
+    however, if you don't add a large enough throttle-factor (default throttle-factor is 25ms) on
+    ./ater -rc=./at-commands/tofail -rwp -stats
+    $ echo $?
+    0
+
+    the ping command will pong before the device shutdown ($QCPWRDN)
+
+    so, add a large throttle-factor ie wait time in between commands
+    ./ater -rc=./at-commands/tofail -rwp -stats -throttle-factor=5000
+    Ater:main::atadb shell "echo 'AT+CGMI\r' > /dev/smd8" 256
+    Ater: main::test_commands: __dev__smd8 did not pong after $QCPWRDN
+    $ echo $?
+    3
+
+    if you know of a good trap, you could try
+    ./ater -rc=./at-commands/verbs.MSM8917C00B191.ater -rwt -stats
+
+    find AT commands that trigger the trap ie change the trap value
+    ./ater -rc=./at-commands/verbs.MSM8917C00B191.ater -rwt -findresets -stats
+
+    test a list of commands from a file, that is run AT_COMMAND, AT_COMMAND?, AT_COMMMAND=? for each AT_COMMAND
+    ./ater -tc=./at-commands/verbs.MSM8917C00B191.ater -stats
+
+    test a list of commands from a pipe, that is run AT_COMMAND, AT_COMMAND?, AT_COMMMAND=? for each AT_COMMAND
+    ./ater -tc './helpers.sh ah_look_for_HiSi_AT_commands|' -stats
+
+    robust AT device ping
+    source ./helpers.sh
+    ah_wait -at -ping
+
+    attempt to learn set objects/values for commands learned with LEARN_VERBS_SEED
+   ./ater -lso -stats
+
+    run AT_COMMAND, AT_COMMAND?, AT_COMMMAND=? for ~ commands learnded with LEARN_VERBS_SEED
+    ./ater -lao -stats
+
+    run AT_COMMAND, AT_COMMAND?, AT_COMMMAND=? for all commands from file
+    ./ater -laocff=./at-commands/verbs.MSM8917C00B191.ater -stats
+
+    run AT_COMMAND, AT_COMMAND?, AT_COMMMAND=? for all commands from pipe
+    ./ater -laocff './helpers ah_look_for_HiSi_AT_commands|' -stats
+
+    see the MS-SIM IMSI number
+    /ater -at=+CIMI
+
+    look up an mccmnc number
+    ./ater -mccmnc 20201
+
+    look up mobile operators in China
+    ./ater -mccgrep china
+
+    explore android system with serial device KVXBB17C01210608 ($ adb devices)
+    ./ater -serial KVXBB17C01210608 -wa
+
+=cut
+
+=head1 Origin
+
+  g0, 2018
+
+=cut
+
+my ($name, $path, $suffix) = fileparse( $0, qr/\.[^.]*$/ );
+my $DEBUG = 0;
+our $ME = basename($0);
+   $ME =~ tr/\.pl$//d;
+my $CONFIG = "${path}$ME.conf";
+my $ME_plain = $ME;
+our %CONF = ();
+
+sub say_config {
+  while(my ($key,$val) = each(%CONF)){
+    say "$key -> \'$val\'";
+  }
+}
+
+sub read_config
+{
+  open CONFIG, '<' ,$CONFIG or die "$ME: " . (caller(0))[3] . " $!";
+  while(<CONFIG>){
+    chomp;
+    s/#.*//;
+    s/^\s+//;
+    s/\s+$//;
+    next unless length;
+    my ($var,$val) = split(/\s*=\s*/, $_ , 2);
+    $CONF{$var} = $val;
+  }
+  close CONFIG;
+  say_config if($DEBUG);
+}
+
+read_config;
+
+my @AT_Blist =  ();
+if(exists $CONF{'AT_Blist'}){
+  @AT_Blist = split(',', $CONF{'AT_Blist'});
+  for(@AT_Blist){
+    s/^\s+//g;
+    s/\s+$//g;
+  }
+}
+
+sub blacklisted
+{
+  my $command = shift;
+  say "$ME" . (caller(0))[3] . " checking $command" if $DEBUG;
+  return 1 if(grep(/^${command}$/, @AT_Blist));
+  return 0;
+}
+
+my @LEARN_VERBS_SEED = ();
+if(exists $CONF{'LEARN_VERBS_SEED'}){
+  @LEARN_VERBS_SEED = split(',', $CONF{'LEARN_VERBS_SEED'});
+  for(@LEARN_VERBS_SEED){
+    s/^\s+//g;
+    s/\s+$//g;
+  }
+}
+
+my $AT_RESP_LOCK = $CONF{'AT_RESP_LOCK'} || "/tmp/ater.lock";
+my $AT_serial = $CONF{'AT_serial'} || '/dev/smd11';
+my $cATout = '"cat ' . $AT_serial . '"';
+my $DEFAULT_cATout = '"cat ' . $AT_serial . '"';
+
+my $DLM = $CONF{'DLM'} || '|';
+my $RATE = $CONF{'RATE'} || 25;
+
+my $PING_COMMAND = $CONF{'PING_COMMAND'};
+my $PONG_RESPONSE = $CONF{'PONG_RESPONSE'};
+my $TRAP_SET_COMMAND = $CONF{'TRAP_SET_COMMAND'};
+my $TRAP_QUERY_COMMAND = $CONF{'TRAP_QUERY_COMMAND'};
+my $TRAP_DEFAULT_VALUE = $CONF{'TRAP_DEFAULT_VALUE'};
+my $TRAP_VALUE = $CONF{'TRAP_VALUE'};
+
+my $TRAP_QUERY_COMMAND_SENT_COUNT = 0;
+my $TRAP_TRIGGER_COUNT = 0;
+my $PING_COMMAND_SENT_COUNT = 0;
+my $MCC_in = '';
+my $MCCMNC_in = '';
+my $MCCGREP_in = '';
+my $ADB_SHELL_COMMAND='';
+my $ANDROID_PID_BY_NAME='';
+my $ANDROID_PID='';
+my $ANDROID_SRV='';
+
+my %ops = ();
+my @ops = (
+           'at|at-command=s',
+           's|adb-shell-command=s',
+           'serial|adb-serial-device=s',
+           'stats|statistics',
+           'atdev|at-device=s',
+           'help|?',
+           'verbose',
+           'lv|learn-verbs',
+           'lso|learn-set-objects',
+           'lao|learn-all-objects|set-objects-and-options',
+           'laocff|learn-all-objects-commands-from-file=s',
+           'who',
+           'was|who-android-system',
+           'wsr|who-android-service=s',
+           'wpn|who-android-pid-by-name=s',
+           'wpi|who-android-pid=i',
+           'debug|debug-ater',
+           'time',
+           'doc|documentation',
+           'rate|throttle-factor=i',
+           'grol|get-rid-of-lock',
+           'printmd|print-md',
+           'tc|test-commands-from-file-or-pipe=s',
+           'rc|run-commands-from-file-or-pipe=s',
+           'rwt|run-rc-with-chk-trap',
+
+           'rwp|run-rc-with-ping',
+#          'll|list-locks',
+
+#          ./helpers wait -at +CGMI
+#           source helpers; ah_wait -at +CGMI
+#          'wait|w|adb-wait-for-device',
+
+           'findresets|rc-find-commands-that-reset-trap',
+#          'lt|list-trap-triggers',
+
+           'testping|test-ping-command',
+           'ping',
+           'chk|check-trap',
+           'settrap',
+           'su|su-instead-of-adb-root',
+           'mcc=s',
+           'mccmnc=s',
+           'mccgrep=s',
+           'ops',
+);
+
+GetOptions(
+            \%ops,
+           'at|at-command=s',
+           's|adb-shell-command=s' => \$ADB_SHELL_COMMAND,
+           'serial|adb-serial-device=s',
+           'stats|statistics',
+           'atdev|at-device=s' =>\$AT_serial,
+           'help|?',
+           'verbose',
+           'lv|learn-verbs',
+           'lso|learn-set-objects',
+           'lao|learn-all-objects|set-objects-and-options',
+           'laocff|learn-all-objects-commands-from-file=s',
+           'who',
+           'was|who-android-system',
+           'wsr=s'  => \$ANDROID_SRV,
+           'wpn=s' => \$ANDROID_PID_BY_NAME,
+          #'wpi|who-android-pid=i' => \$ANDROID_PID,
+           'wpi=i' => \$ANDROID_PID,
+           'debug|debug-ater' => \$DEBUG,
+           'time',
+           'doc|documentation',
+           'rate|throttle-factor=i' => \$RATE,
+           'grol|get-rid-of-lock',
+           'printmd|print-md',
+           'tc|test-commands-from-file-or-pipe=s',
+           'rc|run-commands-from-file-or-pipe=s',
+           'rwt|run-rc-with-chk-trap',
+           'rwp|run-rc-with-ping',
+#          'll|list-locks',
+#          'wait|w|adb-wait-for-device',
+           'findresets|rc-find-commands-that-reset-trap',
+#          'lt|list-trap-triggers',
+           'testping|test-ping-command',
+           'ping',
+           'chk|check-trap',
+           'settrap',
+           'su|su-instead-of-adb-root',
+           'mcc=s' => \$MCC_in,
+           'mccmnc=s' => \$MCCMNC_in,
+           'mccgrep=s'=> \$MCCGREP_in,
+           'ops',
+)or die("\n$ME: I could not make sense of your options.\n");
+
+Getopt::Long::Configure("bundling");
+
+my $wpn = $ops{'wpn'};
+my $wpi = $ops{'wpi'};
+my $wsr = $ops{'wsr'};
+my $was= $ops{'was'};
+my $sh_adb = $ops{'s'};
+my $ops = $ops{'ops'};
+my $mcc = $ops{'mcc'};
+my $su = $ops{'su'};
+my $settrap = $ops{'settrap'};
+my $laocff = $ops{'laocff'};
+my $chk = $ops{'chk'};
+my $ping = $ops{'ping'};
+my $testping = $ops{'testping'};
+my $tc = $ops{'tc'};
+my $rc = $ops{'rc'};
+my $rwt = $ops{'rwt'};
+my $rwp = $ops{'rwp'};
+my $findresets= $ops{'findresets'};
+my $atcmd = $ops{'at'};
+my $statistics = $ops{'stats'};
+# my $serial = $ops{'serial'};
+our $serial = $ops{'serial'};
+my $help = $ops{'help'};
+my $chk_trap = $ops{'chk'};
+my $verbose = $ops{'verbose'};
+my $atdev = $ops{'atdev'};
+my $learn_verbs = $ops{'lv'};
+my $learn_set_objects = $ops{'lso'};
+my $learn_all_objects = $ops{'lao'};
+my $who = $ops{'who'};
+my $time = $ops{'time'};
+my $wait_for_device = 0;
+#my $wait_for_device = $ops{'wait'};
+my $doc = $ops{'doc'};
+my $get_rid_of_lock = $ops{'grol'};
+my $print_README_md = $ops{'printmd'};
+
+if($serial){
+  $serial = '-s ' . $serial . ' ';
+}else{
+  $serial = '';
+}
+
+# $serial = "wait-for-device $serial" if(exists $ops{'wait'});
+# not as easy as it sounds or I am tripping
+# perldoc -f alarm
+# or  from adb, wait-for[-TRANSPORT]-STATE
+# wait for device to be in the given state
+# easier and better with a wrapper though e.g. ./wait-for-device.sh -at +CGMI
+
+sub adb_device_serial
+{
+  my @devices_list = `adb devices -l`;
+  my @serial = ();
+  for(@devices_list){
+    next if(/^List\s+.*/); #but
+    if(/device/){
+      my @fields = split /\s+/, $_;
+      push @serial, $fields[0];
+    }
+  }
+  if($DEBUG){ say '' . (caller(0))[3] . "->" . $_ for(@serial); }
+  return @serial;
+}
+
+my $dev = $AT_serial;
+my $delimeter = '__';
+$dev =~ s/\//$delimeter/g;
+my @serials = adb_device_serial;
+my $androidserial = $serials[0] unless(length $serial);
+
+my $DATA_DIR = $CONF{'DATA_DIR'} || "${path}data";
+my $DATA_MCCMNC = $CONF{'DATA_MCCMNC'} || "${DATA_DIR}/MCCMNCv2.csv";
+
+my $LOG_DIR = $CONF{'LOG_DIR'} || "${path}logs";
+my $TEST_COMMANDS_LOG= "$LOG_DIR/${androidserial}_${dev}_test_commands.ater";
+my $LOG_VERBS = $CONF{'LOG_VERBS'} || "$LOG_DIR/${androidserial}_${dev}_verbs.ater";
+my $LOG_SET_OK_OBJECTS = $CONF{'LOG_SET_OK_OBJECTS'} || "$LOG_DIR/${androidserial}_${dev}_set_objects_ok.ater";
+my $LOG_SET_ERROR_OBJECTS = $CONF{'LOG_SET_ERROR_OBJECTS'} || "$LOG_DIR/${androidserial}_${dev}_set_objects_error.ater";
+my $LOG_SET_REST_OBJECTS = $CONF{'LOG_SET_REST_OBJECTS'} || "$LOG_DIR/${androidserial}_${dev}_set_object_other.ater";
+my $LOG_ALL_OK_OBJECTS = $CONF{'LOG_ALL_OK_OBJECTS'} || "$LOG_DIR/${androidserial}_${dev}_objects_all_ok.ater";
+my $LOG_ALL_ERROR_OBJECTS = $CONF{'LOG_ALL_ERROR_OBJECTS'} || "$LOG_DIR/${androidserial}_${dev}_objects_all_error.ater";
+
+my $DEFAULT_LOG_ALL_REST_OBJECTS = "$LOG_DIR/${androidserial}_${dev}_all_rest.ater";
+my $DEFAULT_LOG_OPTIONS = "$LOG_DIR/${androidserial}_${dev}_objects_options.ater";
+my $DEFAULT_LOG_OPTIONS_E = "$LOG_DIR/${androidserial}_${dev}_objects_options_e.ater";
+my $DEFAULT_LOG_PIDS = "$LOG_DIR/PIDS_${androidserial}_${dev}.ater";
+
+my $LOG_ALL_REST_OBJECTS = $CONF{'LOG_ALL_REST_OBJECTS'} || $DEFAULT_LOG_ALL_REST_OBJECTS;
+my $LOG_OPTIONS = $CONF{'LOG_OPTIONS'} || $DEFAULT_LOG_OPTIONS;
+my $LOG_OPTIONS_E = $CONF{'LOG_OPTIONS_E'} || $DEFAULT_LOG_OPTIONS_E;
+my $LOG_PIDS = "$CONF{'LOG_PIDS'}" || $DEFAULT_LOG_PIDS;
+
+my $R_CME_ERROR = "$CONF{'R_CME_ERROR'}" || 'red';
+my $R_ERROR = "$CONF{'R_ERROR'}" || 'red';
+my $R_OK = "$CONF{'R_OK'}" || 'green';
+my $R_NO_CARRIER = "$CONF{'R_NO CARRIER'}" || 'magenta';
+my $ATER_COLOR = "$CONF{'ATER_COLOR'}" || 'bold green';
+
+$ME = ''. color($ATER_COLOR) . ucfirst $ME . color('reset');
+
+if($ops){
+  for(@ops){
+    print "-";
+    if(/\|/){
+      my @fs = split(/\|/, $_);
+      print $fs[0];
+    }else{
+      print ;
+    }
+    print ' ';
+  }
+  exit 0;
+}
+
+if($help){
+  say;
+  print "$ME ";
+  say ' options';
+  say "\t --$_" for(@ops);
+  say;
+  print "$ME ";
+  say 'configuration';
+  say "\t $ME_plain.conf";
+  say;
+  exit 0;
+}
+
+if($print_README_md){
+  for(`pod2text $0`){
+    if(/^Synopsis.*/){
+      print '# ';
+      print;
+      say "\t\t --$_" for(@ops);
+      print "\n";
+    }else{
+      print '# ' if(/^\w.*/);
+      print;
+    }
+  }
+  exit 0;
+}
+
+if($get_rid_of_lock){
+  unlink $AT_RESP_LOCK or warn "$ME: " . (caller(0))[3] . "I could not delete $AT_RESP_LOCK. $!";
+  my @pinfs = <$LOG_DIR/PIDS*ater>;
+  for my $file (@pinfs){
+    say "file $file";
+    open FILE, '<' , $file or die "$ME: " . (caller(0))[3] . " $!";
+      while(<FILE>){
+        next unless length;
+        chomp;
+        s/^\s+//;
+        s/\s+$//;
+        next unless(/^\d+$/);
+        say;
+        system("kill -9 $_ " . ++$_ ." ".  ++$_ );
+      }
+    close FILE;
+    say $file;
+    unlink $file or warn "$ME: " . (caller(0))[3] . "I could not delete $file. $!";
+  }
+  exit 0;
+}
+
+if($doc){
+  pod2usage({-exitval => 0, -verbose => 2, -output => \*STDOUT});
+}
+
+if($wait_for_device){ #nop
+  my $PID;
+  my @args = ();
+  say "wait for device" if $DEBUG;
+  say "@ARGV" if $DEBUG;
+  for my $arg(@ARGV){
+    unless(/-w/){
+      push @args, $arg;
+    }
+  }
+  system("${path}wait-for-device.sh " . @args);
+  if($PID = fork){
+    say "$ME: wait ". ++$PID . "." if($DEBUG);
+    say "PID: $PID" if $DEBUG;
+  }else{
+    system("${path}wait-for-device.sh ".@args) or print STDERR "$ME: $!";
+    exit 0;
+  }
+  exit 0;
+}
+
+my $line_p = 0;
+my @gsieved = ();
+my %OPTIONS = ();
+my $OLDPID = 0;
+my $PID = 255;
+
+my $ATC = 0;
+my $ERC = 0;
+my $OKC = 0;
+my $OTHER_C = 0;
+my $CMEERROR_C = 0;
+my $NO_CARRIER_C = 0;
+
+my $ATout = '';
+
+sub data_mcc
+{
+    my ($mcc, $mccmnc, $any) = @_;
+    my $DEL = ',,';
+    my $MCC = 1;
+    my $MCCMNC = 0;
+
+    say "0 - Test Networks" if($mcc eq "0");
+    say "2 - Europe" if($mcc eq "2");
+    say "3 - North America and the Carribean" if($mcc eq "3");
+    say "5 - Oceania" if($mcc eq "5");
+    say "6 - Africa" if($mcc eq "6");
+    say "7 - South and Central America" if($mcc eq "7");
+    say "9 - World Wide" if($mcc eq "9");
+
+    open(my $FH, "<", $DATA_MCCMNC) or die ("I could not open $DATA_MCCMNC: $!");
+      foreach (<$FH>){
+        chomp;
+
+        if(length $any){
+          say if(/$any/i);
+          next;
+        }
+
+        my @line = split($DEL, $_);
+        if(defined $mccmnc){
+          say if($line[0] eq $mccmnc);
+        }else{
+          say if($line[1] eq $mcc);
+        }
+
+      }
+    close($FH);
+}
+
+sub at
+{
+  my $com = $_[0];
+
+  my $silent = 0;
+  $silent = 1 if defined $_[1] and $_[1] =~ /.*silent.*/;
+
+  my $print = $_[2];
+  $print = 1 if($print eq 'print');
+
+  my $status = 0;
+
+  unless($silent){
+    print color('blue');
+    print "$ME" . (caller(0))[3]  if($print);
+    $DEBUG ? print "( $com," . quotemeta($com) . ")->\n" : print "( $com )->\n";
+    print color('reset');
+  }
+
+
+  my $sh = '';
+  if(defined $su){
+    $com =~ s/\$/\\\\\\\$/g;
+    $sh = 'adb '.$serial.'shell "su -c \'echo \\"AT' . $com . '\r\\" > ' . $AT_serial."'\"";
+  }else{
+    $com =~ s/"/\\"/g;
+    $com =~ s/'/\\'/g;
+    $com =~ s/\$/\\\$/g;
+    $sh = 'adb '.$serial.'shell "echo \'AT'.$com.'\r\' > '.$AT_serial.'"';
+  }
+  say "sh: ".$sh  if $DEBUG;
+
+  system($sh);
+  if($? == 0){
+    $status = 1;
+  }else{
+    say "$ME:" . (caller(0))[3] . $sh . " $?";
+  }
+
+  $ATC++;
+  return $status;
+}
+
+sub init_line_p
+{
+  $line_p = 1;
+  open ATOUT, "<$ATout" or die "$ME:" . (caller(0))[3] . ": Can't open < $ATout : $!";
+    $line_p++ while(<ATOUT>);
+  close ATOUT;
+}
+
+sub rr
+{
+  my $me = (caller(0))[3];
+  my $line_c = 0;
+  my @response = ();
+
+  my $silent = 0;
+  $silent = 1 if(defined($_[1]) and $_[1] =~ /.*silent.*/);
+  say "<- $_[0]" if $DEBUG;
+
+  usleep(1000 * $RATE);
+  #chk_lock
+
+  open ATOUT, "<$ATout" or die "$ME:$me:  can't open < $ATout : $!\n";
+    while(<ATOUT>){
+      if($. >= $line_p){
+        print "r: $.: $_" if $DEBUG;
+        chomp;
+        tr/\cM//d;
+        push @response, $_;
+        $line_c++;
+        }
+      };
+      # seek ATOUT, $fpos, 1;
+      # $fpos = tell ATOUT;
+  close ATOUT;
+
+   $line_p += $line_c;
+   say "<-." if $DEBUG;
+
+   unless($silent){
+     for(@response){
+        if(/^\+CME\s?ERROR/){
+          print color($R_CME_ERROR);
+          $CMEERROR_C++;
+          last;
+        }
+        elsif(/^ERROR/){
+          $ERC++;
+          print color($R_ERROR);
+          last;
+        }elsif(/^OK/){
+          $OKC++;
+          print color($R_OK);
+          last;
+        }elsif(/^NO\s?CARRIER/){
+          $NO_CARRIER_C++;
+          print color($R_NO_CARRIER);
+          last;
+        }
+     }
+    say "<- $ARGV[0]";
+    say $_ for(@response);
+    say "<-.";
+    print color('reset');
+  }
+  return @response;
+}
+
+#sub who_android_system
+#{
+#  say_command("setenforce 0;getenforce");
+#  say_command("getprop |egrep 'adb|secure|kernel|debug'");
+#  say_command("echo 1 > /dev/hwlog_switch");
+#  say_command("cat /dev/hwlog_switch");
+#  say_command("cat /sys/kernel/debug/debug_enabled");
+#  say_command("ls /sys/kernel/debug");
+#  # /data/local.prop
+#  say_command("getprop ro.debuggable");
+#  say_command("setprop kmleak.debug 1");
+#  say_command("setprop debug.aps.enable 1");
+#  say_command("setprop persist.sys.huawei.debug 1");
+#  say_command("setprop persist.sys.kmemleak.debug 1");
+#  say_command("setprop debug.atrace.tags.enableflags 1");
+#  say_command("getprop |grep kmleak");
+#  say_command("toybox ps -AlwZ |grep -i debug");
+#  say_command("getprop |grep -i debug");
+#  say_command("grep Proc /proc/cpuinfo");
+#  say_command("cat /proc/cpuinfo |grep CPU |sort |uniq");
+#  say_command("free -h");
+#  say_command("cat /vendor/build.prop");
+#  say_command("ls -l /etc/init");
+#  say_command("grep mount_all /*rc");
+#  # say_command("getprop |grep ro");
+#  # say_command("ls -l /dev/block/platform/*/by-name 2>/dev/null");
+#  say_command("find /{system,vendor}/bin -perm -4000 -o -perm -2000 -exec ls -lZ {} \\;");
+#  #don't try to or with above
+#  say_command("find /{system,vendor}/bin -perm -2 -exec ls -lZ {} \\;");
+#  say_command("find /dev/socket -perm -4000 -o -perm 2000 -o -perm -2 -exec ls -lZ {} \\;");
+#  say_command("find /dev -perm -2 -exec ls -lZ {} \\;");
+#  say_command("find /dev/ -type c -a -user root -o -user radio -type c -exec ls -lZ {} \\;");
+#  say_command("cat /proc/net/{ptype,protocols}");
+#  say_command("toybox netstat -paneW |grep LISTEN");
+#  say_command("toybox netstat -punta");
+#}
+
+sub who
+{
+  my $ADB = "adb $serial";
+  my $state = `$ADB get-state`; chomp $state;
+  my $devpath = `$ADB get-devpath`; chomp $devpath;
+  my $serialno = `adb get-serialno`; chomp $serialno;
+  my $dev_arch = `$ADB shell getprop ro.product.cpu.abi`; chomp $dev_arch;
+  my $dev_sdk_v = `$ADB shell getprop ro.build.version.sdk`; chomp $dev_sdk_v;
+
+  say "$ME:" . (caller(0))[3] . "\t adb:$state:$devpath:$serialno:$dev_arch:$dev_sdk_v";
+
+  at('I', 'silent');
+  my @resp = rr('I', 'silent');
+  my $OK = pop @resp;
+  say "$ME:" . (caller(0))[3] . "   @resp " . color('bold green') . $OK . color('reset') if( defined($_[0]) and $_[0] =~ /.*print.*/);
+  say;
+
+  # who_android_system;
+  who_android_service('ril','radio','modem');
+  # explore_pid('ril');
+
+  for(@resp){
+    return 1 if(/^OK\s.*/);
+  }
+  return 1 if($OK =~ /^OK\s.*/);
+  return 0;
+}
+
+sub at_rr
+{
+  my $com = shift;
+  init_line_p;
+  at($com);
+  usleep(1000 * $RATE);
+  my @resp = rr($com);
+  return @resp;
+}
+
+sub chk_trap
+{
+  my @response = ();
+  my $at_status = 0;
+  return 0 unless(defined $TRAP_QUERY_COMMAND && defined $TRAP_VALUE);
+
+  my $at_status  = at($TRAP_QUERY_COMMAND, 'silent');
+  my @response = rr($TRAP_QUERY_COMMAND, 'silent');
+  $TRAP_QUERY_COMMAND_SENT_COUNT++;
+
+  for(@response){
+    return 1 if(/$TRAP_VALUE/);
+  }
+
+  ++$TRAP_TRIGGER_COUNT;
+  return 0;
+}
+
+sub learn_set_objects
+{
+  my @gsieved = @_;
+  say "--\n@gsieved\n--\n" if $DEBUG;
+
+  truncate $LOG_SET_OK_OBJECTS, 0;
+  truncate $LOG_SET_ERROR_OBJECTS, 0;
+  truncate $LOG_SET_REST_OBJECTS, 0;
+
+  my $com = '';
+  my @response = ();
+  say "learning set objects ...";
+  if(scalar @gsieved < 12){
+    say "gsieved contents: { @gsieved }" if $DEBUG;
+  }
+
+  for(@gsieved){
+    my $com = $_;
+    next if(grep(/^$com$/, @AT_Blist));
+       $com =~ s/"/\\"/g;
+       $com =~ s/'/\\'/g;
+       $com =~ s/\$/\\\$/g;
+       $com =~ s/\^/\\\^/g;
+    my $aOK = 0;
+    my $aERROR = 0;
+    $com = "$_" . '?';
+
+    at($com);
+    @response = rr("$_".'?');
+
+    for(@response){
+      if(/.*ERROR.*/){
+        $aERROR = 1;
+      }elsif(/^OK/){
+        $aOK = 1;
+      }
+    }
+
+    if($aOK){
+      log_response(\@response, $LOG_SET_OK_OBJECTS, $com);
+    }elsif($aERROR){
+      log_response(\@response, $LOG_SET_ERROR_OBJECTS, $com);
+    }else{
+      log_response(\@response, $LOG_SET_REST_OBJECTS, $com);
+    }
+  }
+
+  say " $LOG_SET_OK_OBJECTS";
+  say " $LOG_SET_ERROR_OBJECTS";
+  say " $LOG_SET_REST_OBJECTS";
+}
+
+sub learn_all_objects
+{
+  my @gsieved = @_;
+  say "--\n@gsieved\n--\n" if $DEBUG;
+
+  truncate $LOG_ALL_OK_OBJECTS, 0;
+  truncate $LOG_ALL_ERROR_OBJECTS, 0;
+  truncate $LOG_ALL_REST_OBJECTS, 0;
+  truncate $LOG_OPTIONS, 0;
+  truncate $LOG_OPTIONS_E, 0;
+
+  my $como = '';
+  my @response = ();
+  say "$ME:" . (caller(0))[3] . " ..." if $DEBUG;
+
+  for(@gsieved){
+    my $quoted_command = quotemeta($_);
+    say "$ME:" . (caller(0))[3] . " quoted_command: $quoted_command" if $DEBUG;
+    next if(grep(/^$quoted_command$/, @AT_Blist));
+    my $sieved_com = $_;
+
+    at_log_response($LOG_OPTIONS_E, "$sieved_com");
+    at_log_response($LOG_OPTIONS_E, "${sieved_com}?");
+    at_log_response($LOG_OPTIONS_E, "$sieved_com=?", 1);
+
+    open my $fh, '>>', $LOG_OPTIONS_E or die "$ME:" . (caller(0))[3] . " can't append to $LOG_OPTIONS_E :\n $!\n";
+      print $fh "\n";
+    close $fh;
+
+    my $aOK = 0;
+    my $aERROR = 0;
+    my $sieved_com = $_;
+
+    say "\t \$_:$_" if $DEBUG;
+
+    $como = "$_" . '=?';
+    at($como);
+
+    @response = rr($como);
+    for(@response){
+      if(/^ERROR/){
+        $aERROR = 1;
+      }elsif(/^OK/){
+        $aOK = 1;
+      }
+      if(/^\Q$sieved_com\E:+\s+\(/){
+
+        my @fields = split /:/, $_;
+        say '-' x 6 . "\t $_" if $DEBUG;
+
+        open my $fh, '>>', $LOG_OPTIONS or die "$ME:" . (caller(0))[3] . " can't append to $LOG_OPTIONS :\n $!\n";
+          print $fh "$fields[0] ".$DLM." ";
+          print $fh "$fields[1]\n";
+        close $fh;
+
+        open my $fh, '>>', $LOG_OPTIONS_E or die "$ME:" . (caller(0))[3] . " can't append to $LOG_OPTIONS_E :\n $!\n";
+          print $fh "\n$fields[0] ".$DLM." ";
+          print $fh "$fields[1]\n";
+        close $fh;
+
+      }else{
+        print "\t else: $_ \n" if $DEBUG;
+      }
+    }
+    if($aOK){
+      log_response(\@response, $LOG_ALL_OK_OBJECTS, $como);
+    }elsif($aERROR){
+      log_response(\@response, $LOG_ALL_ERROR_OBJECTS, "$sieved_com , $como");
+    }else{
+      log_response(\@response, $LOG_ALL_REST_OBJECTS, $como);
+    }
+  }
+
+  say "$ME:" . (caller(0))[3] . " relevant log files";
+  say "$LOG_ALL_OK_OBJECTS";
+  say "$LOG_ALL_ERROR_OBJECTS";
+  say "$LOG_ALL_REST_OBJECTS";
+  say "$LOG_OPTIONS";
+  say "$LOG_OPTIONS_E";
+}
+
+sub print_sieved
+{
+  our @gsieved;
+  print '-' x 12 . "\n";
+  say $_ for(@gsieved);
+  print '-' x 12 . "\n";
+}
+
+sub print_OPTIONS
+{
+  say "Options: ";
+  for my $at_command (keys  %OPTIONS){
+    print "'$at_command' -> ";
+    my $rc = 0;
+    for(@{ $OPTIONS{$at_command} }){
+      ( $rc++ == $#{ $OPTIONS{$at_command} } ) ? print " $_ " : print " $_ $DLM";
+    }
+    print "\n";
+  }
+}
+
+sub uniq
+{
+  my %seen;
+  return grep { !$seen{$_}++ } @_;
+}
+
+sub learn_verbs
+{
+  our @gsieved;
+  my @sieved = ();
+  my @resp = ();
+
+  say "$ME: learning listed AT CLI verbs ..." if($_[0] eq 'print');
+
+  my @lvs = @LEARN_VERBS_SEED;
+  for(@lvs){
+    at($_);
+    push @resp, rr($_);
+    say "$_ response line count: ". scalar @resp if $DEBUG;
+  }
+  @lvs = ();
+  my @uni = uniq(@resp);
+  for(@uni){
+    chomp;
+    tr/\cM//d;
+    tr/^\s+//;
+    tr/\s+$//;
+    next if($_ eq '');
+    next if(/^AT.*/);
+    next if(/^OK.*/);
+    next if(/^ERROR.*/);
+    push @sieved, $_;
+  }
+
+  say "$ME:" . (caller(0))[3] . " found " . scalar @sieved . " listed commands." if($DEBUG || ($_[0] eq 'print'));
+
+  open my $fh, '>', $LOG_VERBS or die ' ' . (caller(0))[3] . ": Could not open file $LOG_VERBS, $!";
+    print $fh "$_\n" for(@sieved);
+  close $fh;
+
+  say "$ME:" . (caller(0))[3] . " relevant log file";
+  say "$LOG_VERBS";
+
+  return @sieved;
+}
+
+sub log_command
+{
+  my ($file, $com)  = @_;
+  open my $fh, '>>', $file or die "$ME:" . (caller(0))[3] . " Could not open file $file, $!";
+    print $fh "$com\n";
+  close $fh;
+}
+
+sub log_response
+{
+  my ($response_ref, $file, $com)  = @_;
+
+  open my $fh, '>>', $file or die "$ME:" . (caller(0))[3] . " Could not open file $file, $!";
+    my $count = 0;
+    my $resp = '';
+    for(@$response_ref) {
+      next if(/^\s*$/);
+      next if(/^OK/);
+      next if(/^ERROR/);
+      if($count++ == $#{$response_ref}){
+        $resp .= "$_";
+        last;
+      }else{
+          $resp .= "$_ $DLM ";
+      }
+    }
+    print $fh "$com, $resp\n";
+  close $fh;
+}
+
+sub at_log_response
+{
+  my @options = ();
+  my ($file, $com, $addToOptionHashBool) = @_;
+
+  at($com);
+  my @response = rr($com);
+
+  open my $fh, '>>', $file or die "$ME:" . (caller(0))[3]  . "Could not open file $file, $!";
+    my $count = 0;
+    my $resp = '';
+    for(@response){
+      next if(/^\s*$/);
+      next if(/^OK/);
+      next if(/^ERROR/);
+      next if(/^\s*AT\Q${com}\E[\s|\cM]*$/);
+      next if(/^\s*AT${com}[\s|\cM]*$/);
+      if($count++ == $#response){
+        $resp .= "$_";
+        push @options, $_;
+        last;
+      }else{
+        $resp .= "$_ $DLM ";
+      }
+      push @options, $_;
+    }
+    print $fh "$com, $resp\n";
+  close $fh;
+
+   @{ $OPTIONS{$com} } = @options if(defined $addToOptionHashBool and $addToOptionHashBool == 1);
+}
+
+sub learn_set_objects
+{
+  my @gsieved = @_;
+  say "--\n@gsieved\n--\n" if $DEBUG;
+
+  truncate $LOG_SET_OK_OBJECTS, 0;
+  truncate $LOG_SET_ERROR_OBJECTS, 0;
+  truncate $LOG_SET_REST_OBJECTS, 0;
+
+  my $com = '';
+  my @response = ();
+  say "learning set objects ...";
+
+  if($DEBUG && scalar @gsieved < 12){
+    say "gsieved contents: { @gsieved }";
+  }
+
+  for(@gsieved){
+    my $quoted_command = quotemeta($_);
+    next if(grep(/^$quoted_command$/, @AT_Blist));
+    my $aOK = 0;
+    my $aERROR = 0;
+    $com = "$_" . '?';
+
+    at($com);
+    @response = rr("$_".'?');
+
+    for(@response){
+      if(/^ERROR/){
+        $aERROR = 1;
+      }elsif(/^OK/){
+        $aOK = 1;
+      }
+    }
+
+    if($aOK){
+      log_response(\@response, $LOG_SET_OK_OBJECTS, $com);
+    }elsif($aERROR){
+      log_response(\@response, $LOG_SET_ERROR_OBJECTS, $com);
+    }else{
+      log_response(\@response, $LOG_SET_REST_OBJECTS, $com);
+    }
+  }
+
+  say "$ME: " . (caller(0))[3] . " related log files.";
+  say "$LOG_SET_OK_OBJECTS";
+  say "$LOG_SET_ERROR_OBJECTS";
+  say "$LOG_SET_REST_OBJECTS";
+}
+
+
+sub learn_all_objects
+{
+  my @gsieved = @_;
+  say "--\n@gsieved\n--\n" if $DEBUG;
+
+  truncate $LOG_ALL_OK_OBJECTS, 0;
+  truncate $LOG_ALL_ERROR_OBJECTS, 0;
+  truncate $LOG_ALL_REST_OBJECTS, 0;
+  truncate $LOG_OPTIONS, 0;
+  truncate $LOG_OPTIONS_E, 0;
+
+  if($DEBUG && scalar @gsieved < 2){
+    print  __LINE__;
+    say "$ME: " . (caller(0))[3] . " gsieved contents: { @gsieved }";
+    exit 3;
+  }
+
+  my $como = '';
+  my @response = ();
+  say '' . (caller(0))[3] . " ..." if $DEBUG;
+  for(@gsieved){
+    my $quoted_command = quotemeta($_);
+    say ''. (caller(0))[3] . ": quoted_command: $quoted_command" if $DEBUG;
+    next if(grep(/^$quoted_command$/, @AT_Blist));
+    my $sieved_com = $_;
+
+    at_log_response($LOG_OPTIONS_E, "$sieved_com");
+    at_log_response($LOG_OPTIONS_E, "${sieved_com}?");
+    at_log_response($LOG_OPTIONS_E, "$sieved_com=?", 1);
+
+    open my $fh, '>>', $LOG_OPTIONS_E or die "$ME:" . (caller(0))[3] . ": can't append to $LOG_OPTIONS_E :\n $!\n";
+      print $fh "\n";
+    close $fh;
+
+    my $aOK = 0;
+    my $aERROR = 0;
+    my $sieved_com = $_;
+    say "$ME:" . (caller(0))[3] . ":\$_:$_" if $DEBUG;
+
+    $como = "$_" . '=?';
+    at($como);
+
+    @response = rr($como);
+    for(@response){
+      if(/^ERROR/){
+        $aERROR = 1;
+      }elsif(/^OK/){
+        $aOK = 1;
+      }
+      if(/^\Q$sieved_com\E:+\s+\(/){
+
+        my @fields = split /:/, $_;
+
+        say '-' x 6 . "$ME:" . (caller(0))[3] . "$_" if $DEBUG;
+
+        open my $fh, '>>', $LOG_OPTIONS or die "$ME:" . (caller(0))[3] .": can't append to $LOG_OPTIONS :\n $!\n";
+          print $fh "$fields[0] ".$DLM." ";
+          print $fh "$fields[1]\n";
+        close $fh;
+
+        open my $fh, '>>', $LOG_OPTIONS_E or die "$ME:" . (caller(0))[3] . ": can't append to $LOG_OPTIONS_E :\n $!\n";
+          print $fh "\n$fields[0] ".$DLM." ";
+          print $fh "$fields[1]\n";
+        close $fh;
+
+      }else{
+        print '' . (caller(0))[3] . " else: $_ \n" if $DEBUG;
+      }
+    }
+
+    if($aOK){
+      log_response(\@response, $LOG_ALL_OK_OBJECTS, $como);
+    }elsif($aERROR){
+      log_response(\@response, $LOG_ALL_ERROR_OBJECTS, $como);
+    }else{
+      log_response(\@response, $LOG_ALL_REST_OBJECTS, $como);
+    }
+
+  }
+
+  say "$ME:" . (caller(0))[3] . " relevant log files";
+  say "$LOG_ALL_OK_OBJECTS ";
+  say "$LOG_ALL_ERROR_OBJECTS";
+  say "$LOG_ALL_REST_OBJECTS";
+  say "$LOG_OPTIONS";
+  say "$LOG_OPTIONS_E";
+}
+
+sub print_OPTIONS
+{
+  say "Options: ";
+  for my $at_command (keys  %OPTIONS){
+    print "'$at_command' -> ";
+    my $rc = 0;
+    for(@{ $OPTIONS{$at_command} }){
+      ( $rc++ == $#{ $OPTIONS{$at_command} } ) ? print " $_ " : print " $_ $DLM";
+    }
+    print "\n";
+  }
+}
+
+sub do_with_options
+{
+  for my $at_command (keys  %OPTIONS){
+    print "'$at_command' -> ";
+    print "@{ $OPTIONS{$at_command} }\n";
+    print "0: ${ $OPTIONS{$at_command} }[0]\n";
+    print "1: ${ $OPTIONS{$at_command} }[1]\n";
+  }
+
+}
+
+sub ping {
+
+  return 0 unless(length $PING_COMMAND || length $PONG_RESPONSE);
+
+  at($PING_COMMAND, 'silent');
+  my @response = rr($PING_COMMAND, 'silent');
+  $PING_COMMAND_SENT_COUNT++;
+
+  for(@response){
+    return 1 if(/$PONG_RESPONSE/);
+  }
+  return 0;
+}
+
+sub test_commands
+{
+  my ($file, $runcommandsbool) = @_;
+  my $error = 1;
+  my @response = ();
+  my @at_resets = ();
+  my @pongs = ();
+
+  sub command_error
+  {
+    my $command = shift;
+    at($command);
+    @response = rr();
+    for(@response){
+      return 1 if(/ERROR/);
+    }
+    return 0;
+  }
+
+  if($rwt){
+    say "$ME: ". (caller(0))[3] . "setting trap $TRAP_SET_COMMAND";
+    my $status = at($TRAP_SET_COMMAND);
+    my @response = rr();
+  }
+
+  open FILE, $file or die "$ME: " . (caller(0))[3] . " $!";
+  while(<FILE>){
+    chomp;
+    next if(/^#.*/);
+    s/^\s+//;
+    s/\s+$//;
+    next unless length;
+    my $thiscom = $_;
+    if($runcommandsbool){
+      $error = command_error($thiscom);
+
+      if($rwt){
+        if(&chk_trap){
+        }else{
+         say "$ME: ".(caller(0))[3].": trap value changed after $thiscom";
+            if($findresets){
+             push(@at_resets, $thiscom);
+             #and reset trap
+             my $status = at($TRAP_SET_COMMAND);
+             my @response = rr();
+           }else{
+             close FILE;
+             exit 4;
+           }
+         }
+      }
+
+      if($rwp){
+        if(&ping){
+          if($findresets){
+            push(@pongs, $thiscom);
+          }
+        }else{
+          say "$ME: ".(caller(0))[3].": $dev did not pong after $thiscom";
+          close FILE;
+          exit 3;
+        }
+      }
+
+      usleep(1000 * $RATE);
+
+    }else{ #testcommands
+      unless(blacklisted($thiscom)){
+        $error = 0;
+        my @permutations = ( $_, "${_}?", "${_}=?");
+        for my $perm (@permutations){
+          $error = command_error($perm);
+          usleep(1000 * $RATE);
+          if($DEBUG){
+            say "error at @response" if($error);
+          }
+        }
+      }
+    }
+  }
+  close FILE;
+
+  if($findresets){
+     say "$ME:  resets";
+     say for(@at_resets);
+     say "$ME:  pongs:". scalar @pongs;
+  }
+
+}
+
+#nops
+#sub brute_force_int_range {
+# good for pins, etc
+# ~7 days configuration for ~10000 tries; com0 ,wait 1min, com2, adb reboot
+# my ($command, $n_int , $m_int) = @_;
+#}
+#sub android_binaries {
+#  my @adb_jdwports = `adb jdwp`;
+#}
+#sub search_for_atdevs { }
+
+unless(-e $LOG_DIR and -d $LOG_DIR) {
+  mkdir $LOG_DIR;
+}
+
+unless(-e $DATA_DIR and -d $DATA_DIR) {
+  say "$ME: $DATA_DIR was not found";
+}
+
+if(length $ANDROID_SRV){
+  who_android_service($ANDROID_SRV);
+}
+
+if(length $ANDROID_PID){
+  explore_pid("none", $ANDROID_PID);
+}
+
+if($wpn){
+  say "$ME:wpn";
+  explore_pid($ANDROID_PID_BY_NAME);
+}
+
+if($was){
+  who_android_system();
+}
+
+if(length $MCC_in){
+  my $st = data_mcc($MCC_in);
+  exit $st;
+}
+
+if(length $ADB_SHELL_COMMAND){
+  say_command($ADB_SHELL_COMMAND);
+  exit 0;
+}
+
+if(length $MCCMNC_in){
+  data_mcc($MCC_in, $MCCMNC_in);
+  exit 0;
+}
+
+if(length $MCCGREP_in){
+  data_mcc($MCC_in, $MCCMNC_in, $MCCGREP_in);
+  exit 0;
+}
+
+my $adb_devices_count = 0;
+for(`adb devices -l`){
+  next if(/^List.*devices.*/);
+  $adb_devices_count++ if(/.*device.*/);
+}
+if($adb_devices_count < 1){
+  system("adb devices -l") if $DEBUG;
+  say "$ME: No devices seen by adb.";
+  exit 11;
+}elsif($adb_devices_count > 1 && $serial eq ''){
+  say "$ME: More than one devices seen by adb.";
+  say "$ME: Please select one device with --serial=android_device_serial_number.";
+  system("adb devices -l");
+  exit 11;
+}
+
+my %LOCK = ();
+
+if(-e $AT_RESP_LOCK){
+
+    my $OK = 0;
+    local $/ = undef;
+
+    open LOCK, '<', $AT_RESP_LOCK or die "$!";
+      while(<LOCK>){
+        chomp;
+        next unless length;
+        s/^\s+//;
+        s/\s$//;
+        my ($var, $val) = split(/\s*=\s*/, $_, 2);
+        $LOCK{$var} = $val;
+      }
+    close LOCK;
+    # bugs on multiline lock
+    $ATout = $LOCK{'atout'};
+
+    if(-e $LOG_PIDS){
+      open my $fh, '<', $LOG_PIDS or die "$!";
+        $OLDPID = <$fh>;
+        chomp $OLDPID;
+      close $fh;
+
+      my $status = 0;
+      $ATout =~ tr/\n//d;
+      my $sh = "ps ". ++$OLDPID . " 2 > /dev/null";
+      system($sh);
+      if($? == 0){
+        say $ME . ": AT @ $ATout, PID = ". --$OLDPID . "." if($verbose || $DEBUG);
+      }elsif(!$ATout=~/$AT_serial/){
+        say $ME . ": AT @ $ATout, but selected AT_serial is $AT_serial";
+        say "$ME: You may want to clear the ater lock 'ater -grol'";
+        exit 3;
+      }else{
+        say "$ME: $sh failed to execute." if $DEBUG;
+        say "$ME: You may need to clear the ater lock 'ater -grol'";
+        exit 3;
+      }
+    }
+
+}else{
+
+  my $androidserial = $serials[0] unless(length $serial);
+  $ATout = "$LOG_DIR/at.out.${epoch}.${androidserial}${dev}.log";
+  my $lines = "atout = $ATout\n";
+  #my $lines = <<END_LINES;
+  #atout = $ATout\n";
+  #androidserial = $androidserial\n";
+  #atdev = $AT_serial\n";
+  #END_LINES
+
+  open my $fh, '>', $AT_RESP_LOCK or die "$ME: cannot write lock ($AT_RESP_LOCK) $!";
+    print $fh $lines;
+  close $fh;
+
+  my $logcmd = '';
+  if(defined $su){
+    $logcmd = 'adb ' . $serial . 'shell ' . '"su -c \'cat ' . $AT_serial .  "'" . '" >> ' . $ATout;
+  }else{
+    $logcmd = 'adb ' . $serial . 'shell ' . '"cat ' . $AT_serial . '" >> ' . $ATout;
+  }
+  if($PID = fork){
+
+    say "$ME: ATout @ $logcmd, PID = ". ++$PID . "." if(our $verbose);
+
+    open my $fh, '+>', $LOG_PIDS or die "$ME: I could not > $LOG_PIDS : $!";
+      print $fh "$PID\n";
+    close $fh;
+
+    say "PID: $PID" if $DEBUG;
+
+  }else{
+    system($logcmd) or print STDERR "$ME: $!";
+  exit(0);
+  }
+}
+####
+
+my @verbs=();
+sleep 1;
+$ATout = $LOCK{'atout'} if exists $LOCK{'atout'};
+init_line_p();
+sleep 2;
+
+if(defined $testping){
+  at_rr($PING_COMMAND);
+  &ping ? say "ping-pong OK" : say "ping-pong FAILED";
+}
+
+if(defined $ping){
+  &ping ? exit 0 : exit 3;
+}
+
+if(defined $settrap){
+  my $status = at($TRAP_SET_COMMAND);
+  my @response = rr();
+  $status ? exit 0 : exit 4;
+}
+
+if(defined $chk){
+  &chk_trap ? exit 0 : exit 5;
+}
+
+if(defined $atcmd){
+  at_rr($atcmd);
+}
+
+if($who){
+  who('print');
+}
+
+if($wpi){
+  say "$ME:wpi";
+  explore_pid("none", $ANDROID_PID);
+}
+
+if($wpn){
+  say "$ME:wpn";
+  explore_pid($ANDROID_PID_BY_NAME);
+}
+
+if($learn_verbs){
+  @verbs = learn_verbs('print');
+}
+
+if($learn_set_objects){
+  @verbs = learn_verbs unless($learn_verbs);
+  learn_set_objects(@verbs);
+}
+
+if($learn_all_objects){
+  @verbs = learn_verbs unless($learn_verbs || $learn_set_objects);
+  learn_all_objects(@verbs);
+}
+
+if(defined $tc){
+  test_commands($tc);
+}
+
+if(defined $laocff){
+  #unless(-e $laocff && -f $laocff){
+  #   say "$ME $laocff is not a file";
+  # exit 21;
+  #}
+  open HANDL, $laocff or die "$ME: !";
+     chomp(my @commands = <HANDL>);
+  close HANDL;
+  #but, bad for pipes
+  learn_all_objects(@commands);
+}
+
+if(defined $rc){
+  test_commands($rc, 1);
+}
+
+my $stats = 'statistics';
+if($statistics){
+  say "$ME:".$stats."   Sent AT commands  : $ATC" if($ATC > 0);
+  say "$ME:".$stats."   Sent trap queries : $TRAP_QUERY_COMMAND_SENT_COUNT" if($TRAP_QUERY_COMMAND_SENT_COUNT> 0);
+  say "$ME:".$stats."   Sent ping queries : $PING_COMMAND_SENT_COUNT" if($PING_COMMAND_SENT_COUNT> 0);
+  say "$ME:".$stats."        AT +CME ERROR: $CMEERROR_C" if($CMEERROR_C > 0);
+  say "$ME:".$stats."        AT ERROR     : $ERC" if($ERC > 0);
+  say "$ME:".$stats."        AT NO CARRIER: $NO_CARRIER_C" if($NO_CARRIER_C > 0);
+  say "$ME:".$stats."        AT OK        : $OKC" if($OKC > 0);
+  say "$ME:".$stats." Tap Triggers/Resets : $TRAP_TRIGGER_COUNT" if($TRAP_TRIGGER_COUNT > 0);
+
+  $OTHER_C = $ATC - $CMEERROR_C - $ERC - $NO_CARRIER_C - $OKC - $TRAP_QUERY_COMMAND_SENT_COUNT - $PING_COMMAND_SENT_COUNT;
+  say "$ME:statistics        AT OTHER     : $OTHER_C" if($OTHER_C > 0);
+}
+
+if($time){
+  my $t1 = [gettimeofday];
+  my ($sec, $micro_sec) = gettimeofday;
+  my $dt = tv_interval $t0, $t1;
+  say "$ME:main::time\t t0.sec: $sec0, t1.sec: $sec, dt: $dt";
+}
+
+exit 0;
+# vi:syntax=perl

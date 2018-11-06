@@ -1,0 +1,282 @@
+#!/bin/bash
+# g0, 2018
+# ater/helpers
+
+ATER=`realpath ./ater`
+ATER_LOCK='/tmp/ater.lock'
+LOGS='./logs'
+ATER_PIDS='logs/PIDS_*.ater'
+LOGCATS='./logcats'
+SDK="./bin/Android/sdk"
+alias sdk_systrace="$SDK/platform-tools/systrace/systrace.py"
+AND_LOG='/data/log/android_logs'
+
+AND_BIN='/data/system/ater'
+ATER_BIN='./ater_android_bin/arm/24'
+
+complete -W"$($ATER -ops)" ater
+mkdir -p $LOGCATS
+
+ah_push_ater_android_bin(){
+  adb shell "mkdir -p $AND_BIN"
+  adb push $ATER_BIN/* $AND_BIN
+  adb shell "ls -l $AND_BIN"
+}
+
+ah_radio_logcat_kirin_sniff_AT_commands(){
+  adb shell "echo 1 > /dev/hwlog_switch;cat /dev/hwlog_switch"
+  OUT_F="$LOGCATS/radio-logcat-kirin-sniff-AT.out"
+  adb devices -l |grep -v List >> $OUT_F
+  echo "logging at $OUT_F"
+  adb logcat -b radio |grep 'I\sAT' |tee -a $OUT_F
+}
+
+ah_long_ps(){
+  adb shell "toybox ps $1 -w -o USER,UID,TTY,PID,RUID,RGID,RSS,ADDR,CMD,COMM,F,GROUP,MAJFL,NAME,PCPU,S,STIME,VSZ,WCHAN,ETIME,LABEL,NI,PSR"
+}
+
+ah_long_ps_pid(){
+  adb shell "toybox ps -p $1 -n -o USER,UID,TTY,PID,RUID,RGID,RSS,ADDR,CMD,COMM,F,GROUP,MAJFL,NAME,PCPU,S,STIME,VSZ,WCHAN,ETIME,LABEL,NI,PSR"
+}
+
+ah_radio_logcat_kirin_sniff_AT_commands_grep_B1(){
+  adb shell "cat /dev/hwlog_switch"
+  OUT_F="$LOGCATS/radio-logcat-kirin-sniff-AT-B1.out"
+  adb devices -l |grep -v List >> $OUT_F
+  echo "logging at $OUT_F"
+  adb logcat -b radio |grep -B1 'I\sAT' |tee -a $OUT_F
+}
+
+ah_strace(){
+  OUT_F="$LOGS/strace_ah_${1}.out"
+  touch $OUT_F
+  adb shell "pkill strace"
+  echo "logging @ $OUT_F"
+  adb shell  "toybox ps -MwlZ -p $1 \
+              |tee -a $OUT_F"
+
+  #  -yy            print protocol specific information associated with socket file descriptors
+  #  -y             print paths associated with file descriptor arguments
+  #  -i             print instruction pointer at time of syscall
+  #  -C             like -c but also print regular output
+  #  -v             verbose mode: print unabbreviated argv, stat, termios, etc. args
+  #  -s strsize     limit length of print strings to STRSIZE chars (default 32)
+  #  -s512          does not seem to work
+
+  adb shell "$AND_BIN/strace -fyyyiv -p $1 2>&1" |tee $OUT_F
+}
+
+ah_strace_log(){
+  adb shell "$AND_BIN/strace -fffyyyiv -p $1 2>&1" >> $LOGS/strace_${1}.out &
+  tail -f $LOGS/strace-${1}.out
+}
+
+ah_strace_log_log(){
+  adb shell "$AND_BIN/strace -fyyyiv -p $1 -o $AND_LOG/strace-${1}.out &" &
+  adb shell "cat $AND_LOG/strace-${1}.out" >> $LOGS/strace_${1}.out.out &
+  tail -f $LOGS/strace-${1}.out.out
+  # strace -p `pidof zygote` -f -tt -T -s 500 -o $AND_LOG/strace-${1}.out
+  # strace -p `pidof zygote64` -f -tt -T -s 500
+}
+
+ah_strace_open_log_log(){
+  OUT_F="$LOGS/strace_open_${1}.out.out"
+  AOUT_F="$AND_LOG/strace-open-${1}.out"
+  adb shell "$AND_BIN/strace -e open -fyyyiv -p $1 -o $AOUT_F &" &
+  adb shell "cat $AOUT_F" >> $OUT_F &
+  tail -f $OUT_F
+}
+
+ah_strace_view(){
+  tail -f $LOGS/strace*_${1}.out*
+}
+
+ah_strace_app(){
+  echo 'nop'
+  # am start -n com.pkg.wtf\.ActivityName && set `ps | grep com.pkg.wtf` && strace -p $2
+}
+
+ah_radio_logcat(){
+  OUT_F="$LOGCATS/radio-logcat-$(date +%s).out"
+  adb devices -l |grep -v List >> $OUT_F
+  echo "logging at $OUT_F"
+  adb logcat -b radio |tee -a $OUT_F
+}
+
+ah_kirin_radio_logcat_set(){
+  echo "logging @ $LOGCATS/kirin-rillgcat.log"
+  echo "use ah_kirin_radio_logcat_view"
+  adb shell "/system/bin/logcat -b radio -v threadtime -r4096 -z 5 -n 5 -f /data/log/android_logs/rillogcat-log"
+  adb shell "cat /data/android_logs/rillogcat-log" >> $LOGCATS/kirin-rillgcat.log
+}
+
+ah_kirin_radio_logcat_view(){
+  tail -f $LOGCATS/kirin-rillgcat.log
+}
+
+ah_kill_logcats(){
+  pkill adb logcat
+}
+
+ah_systrace_app(){
+  OUT_F="$LOGS/sdk-systrace-${1}.out"
+  echo "systrace $1 out @ $OUT_F"
+  $SDK/platform-tools/systrace/systrace.py -a $1 -o $OUT_F
+  echo "chrome://tracing"
+  open -a '/Applications/Google Chrome.app/' $OUT_F
+}
+
+ah_wait_logcat(){
+  LOGCAT="_$(date +%s).logcat"
+  echo  "logcats at ${LOGCATS}/{radio,}.${LOGCAT} : "
+  adb logcat -b long >> "${LOGCATS}/${LOGCAT}" &
+  adb logcat -b radio >> "${LOGCATS}/radio.${LOGCAT}" &
+}
+
+ah_wait(){
+  SECS=`expr 0`
+  TRIES=`expr 1`
+  rm $ATER_LOCK 2>/dev/null
+
+  for i in `cat $ATER_PIDS`
+  do
+    kill -9 $i \
+            `expr $i + 1` \
+            `expr $i + 2` \
+             2>/dev/null
+  done
+
+  rm $ATER_PIDS
+  adb kill-server 2>/dev/null
+  adb root
+  ah_wait_logcat
+  echo -n "${TRIES},${SECS} :"
+  while ! $ATER $@
+  do
+    SECS=`expr $SECS + 4`
+    TRIES=`expr $TRIES + 1`
+    echo -n "${TRIES},${SECS} :"
+    sleep 4
+    # ah_logcat
+  done
+  #ah_logcat
+}
+
+ah_get_rid_of_lock(){
+  rm $ATER_LOCK 2>/dev/null
+
+  for i in `cat $ATER_PIDS`
+  do
+    kill -9 $i \
+            `expr $i + 1` \
+            `expr $i + 2` \
+    2>/dev/null
+  done
+
+  rm $ATER_PIDS
+
+  # just in yet another race case
+  adb kill-server 2>/dev/null
+  adb root
+}
+
+#test pipes
+ah_joke_coms(){
+  for i in `cat logs/*ok.ater |egrep -v 'INIT|COMPLETED|ERROR|READY|--|Slot|Global|Phone|Book|Unset'`
+    do
+      echo $i |egrep -v 'AT|\||\:|\"|.*\,.*\,|^\,$|^\d{0,3}\.*\,$|^\d{1,6}$|^\d\,\d|\d[\.|\,]\d'
+  done
+}
+
+ah_joke(){
+  ah_joke_coms |sed 's/\,//' |sed 's/\?$//' |sed 's/\=?//' |sort |uniq
+}
+
+# look HiSi AT logs, not only our commands --RIL AT commands are also broadcasted there
+alias ah_look_at_HiSi_AT_logs='cat logs/at.out*appvcom* |less'
+
+ah_look_for_HiSi_AT_commands(){
+  look_for_com(){
+    for i in `ls logs/at.out.*appvcom*`
+      do
+        cat $i |egrep -v '^AT#|^ATlogs' |grep -e '^AT' |sed s/\=\?// |sed s/\?//
+      done
+  }
+  look_for_com |sort |uniq
+}
+
+ah_look_for_HiSi_responses(){
+  cat logs/at.out*appvcom* |grep -e '^\^' |sort |uniq
+}
+
+ah_tail_at_log(){
+ tail -f $(grep atout ater.lock |awk -F '=' '{print $2}')
+}
+
+ah_autodoc(){
+  $ATER --printmd > README.md
+  git add ater
+  git add README.md
+  git add helpers
+  git add ater.conf
+  git commit -m 'autodoc'
+  # git push -u origin master
+ }
+
+ah_ats_in_logs(){
+  echo '
+        nop ...
+        pull libs and bins and look for at commands in binaries with strings'
+}
+
+ case "$1" in
+  'ah_look_for_HiSi_AT_commands'|'look_for_HiSi_AT_commands')
+    ah_look_for_HiSi_AT_commands
+  ;;
+
+  'ah_look_for_HiSi_responses'|'look_for_HiSi_responses')
+    ah_look_for_HiSi_responses
+  ;;
+
+  'ah_wait'|'wait')
+    ARGS=$@
+    NARGS=$@
+    NNARGS=()
+    OLD_IFS=$IFS
+    IFS=' '
+
+    if [ ${#ARGS[@]} -eq 1 ]
+      then
+        read -r -a NARGS <<< "${ARGS[0]}"
+    fi
+
+    shift=1
+    nargs="";
+
+    for i in $( seq 1 `expr ${#NARGS[@]} - 1` )
+      do
+        s=`expr $i - $shift`
+        nargs="${nargs} ${NARGS[$i]}"
+    done
+
+    read -r -a NNARGS <<< "$nargs"
+    IFS=$OLD_IFS
+    ah_wait ${NNARGS[@]}
+  ;;
+
+  'ah_tail_at_log'|'tail_at_log')
+    ah_tail_at_log
+  ;;
+
+  'ah_autodoc'|'autodoc')
+    ah_autodoc
+  ;;
+
+  'ah_grol'|'grol')
+    ah_get_rid_of_lock
+  ;;
+
+esac
+
+#vi: syntax=sh
+
